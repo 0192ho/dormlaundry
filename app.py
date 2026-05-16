@@ -18,6 +18,9 @@ app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'secret123')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///laundry_v2.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'connect_args': {'timeout': 30}
+}
 
 db = SQLAlchemy(app)
 
@@ -141,15 +144,26 @@ def get_admin_password():
         DEFAULT_ADMIN_PASSWORD
     )
 
-# 세탁기는 사용 시작 후 50분이 지나면 자동 완료 처리한다.
+# 세탁기와 건조기는 사용 시작 후 50분이 지나면 자동 완료 처리한다.
 WASHER_AUTO_FINISH_MINUTES = 50
-# 세탁기 자동 완료 5분 전에는 다음 대기자에게 사전 알림을 보낸다.
-WASHER_PRE_NOTICE_BEFORE_MINUTES = 5
-# 건조기는 사용자가 직접 종료하므로 예상 대기 시간 계산에만 쓰는 값이다.
-DRYER_ESTIMATE_MINUTES = 50
+DRYER_AUTO_FINISH_MINUTES = 50
+AUTO_FINISH_MACHINE_TYPES = ('washer', 'dryer')
+# 자동 완료 5분 전에는 다음 대기자에게 사전 알림을 보낸다.
+PRE_NOTICE_BEFORE_MINUTES = 5
+# 기존 이름을 쓰는 코드와의 호환용 별칭이다.
+WASHER_PRE_NOTICE_BEFORE_MINUTES = PRE_NOTICE_BEFORE_MINUTES
 CLEANUP_INTERVAL_SECONDS = 60
 _cleanup_worker_started = False
 _cleanup_lock = threading.Lock()
+
+# PythonAnywhere 무료 계정용: 백그라운드 스레드 대신 웹 요청이 들어올 때만
+# 짧게 자동 정리를 실행한다. 한 번에 너무 많은 문자를 보내면 웹 요청이
+# 멈춰 보일 수 있으므로 처리 건수와 실행 간격을 제한한다.
+WEB_CLEANUP_MIN_INTERVAL_SECONDS = 60
+MAX_CLEANUP_ITEMS_PER_REQUEST = 2
+SOLAPI_TIMEOUT_SECONDS = 4
+ENABLE_PRE_CALL_NOTICES = False
+_last_web_cleanup_at = 0.0
 
 
 # --- 데이터베이스 모델 ---
@@ -178,13 +192,13 @@ class Reservation(db.Model):
     is_expired = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.now)
     notified_at = db.Column(db.DateTime, nullable=True)
-    started_at = db.Column(db.DateTime, nullable=True)  # 사용 시작 시간, 세탁기 자동 완료 기준
+    started_at = db.Column(db.DateTime, nullable=True)  # 사용 시작 시간, 자동 완료 기준
     access_token = db.Column(db.String(64), nullable=True)  # 숫자 URL 추측 방지용 예약 접근 토큰
     is_cancelled = db.Column(db.Boolean, default=False)  # 사용자가 직접 취소한 예약인지
     cancelled_at = db.Column(db.DateTime, nullable=True)  # 사용자가 예약을 취소한 시간
     call_message_sent_at = db.Column(db.DateTime, nullable=True)  # 사용 가능 알림 중복 발송 방지용
     expired_message_sent_at = db.Column(db.DateTime, nullable=True)  # 노쇼 취소 알림 중복 발송 방지용
-    auto_finish_message_sent_at = db.Column(db.DateTime, nullable=True)  # 세탁기 자동 완료 알림 중복 발송 방지용
+    auto_finish_message_sent_at = db.Column(db.DateTime, nullable=True)  # 자동 완료 알림 중복 발송 방지용
     pre_call_message_sent_at = db.Column(db.DateTime, nullable=True)  # 완료 5분 전 사전 알림 중복 발송 방지용
 
     # 예약 화면에서는 세탁기/건조기를 묶어서 받지만,
@@ -238,6 +252,11 @@ def ensure_existing_reservation_tokens():
 
 # --- 초기 데이터 생성 ---
 with app.app_context():
+    if app.config['SQLALCHEMY_DATABASE_URI'].startswith('sqlite:'):
+        with db.engine.connect() as connection:
+            connection.execute(text('PRAGMA journal_mode=WAL'))
+            connection.execute(text('PRAGMA busy_timeout=30000'))
+
     db.create_all()
     ensure_reservation_extra_columns()
     ensure_existing_reservation_tokens()
@@ -277,6 +296,13 @@ def is_valid_phone_number(phone):
 
 def machine_type_label(machine_type):
     return "세탁기" if machine_type == "washer" else "건조기"
+
+
+def auto_finish_minutes_for_type(machine_type):
+    """기기 종류별 자동 완료 기준 시간을 반환한다."""
+    if machine_type == 'dryer':
+        return DRYER_AUTO_FINISH_MINUTES
+    return WASHER_AUTO_FINISH_MINUTES
 
 
 def ensure_reservation_access_token(reservation):
@@ -476,7 +502,7 @@ def send_laundry_message(to_phone, text):
             'https://api.solapi.com/messages/v4/send',
             headers=headers,
             json=body,
-            timeout=15,
+            timeout=SOLAPI_TIMEOUT_SECONDS,
         )
 
         print('Solapi 상태 코드:', response.status_code)
@@ -503,7 +529,7 @@ def send_call_message(reservation):
     label = machine_type_label(machine.type)
     location_name = machine.location.name if machine.location else '세탁실'
     text = (
-        f"[세탁실] {reservation.name}님, {location_name} {label} 사용 차례입니다. "
+        f"{reservation.name}님, {location_name} {label} 사용 차례입니다. "
         "5분 안에 앱에서 사용 시작을 눌러주세요."
     )
 
@@ -513,14 +539,15 @@ def send_call_message(reservation):
     return False
 
 
-def send_pre_call_message(reservation, location_name):
-    """세탁기 자동 완료 5분 전 다음 대기자에게 사전 알림을 보낸다."""
+def send_pre_call_message(reservation, location_name, machine_type):
+    """자동 완료 5분 전 다음 대기자에게 사전 알림을 보낸다."""
     if reservation.pre_call_message_sent_at:
         return False
 
+    label = machine_type_label(machine_type)
     text = (
-        f"[세탁실] {reservation.name}님, 약 {WASHER_PRE_NOTICE_BEFORE_MINUTES}분 후 "
-        f"{location_name} 세탁기 사용 차례가 될 예정입니다. 준비해주세요."
+        f"{reservation.name}님, 약 {PRE_NOTICE_BEFORE_MINUTES}분 후 "
+        f"{location_name} {label} 사용 차례가 될 예정입니다. 준비해주세요."
     )
     if send_laundry_message(reservation.contact, text):
         reservation.pre_call_message_sent_at = datetime.now()
@@ -528,29 +555,18 @@ def send_pre_call_message(reservation, location_name):
     return False
 
 
-def send_expired_message(reservation, location_name, label):
-    """노쇼 자동 취소 알림을 중복 없이 보낸다."""
-    if reservation.expired_message_sent_at:
-        return False
-
-    text = (
-        f"[세탁실] {reservation.name}님, 5분 안에 사용 시작을 누르지 않아 "
-        f"{location_name} {label} 예약이 자동 취소되었습니다."
-    )
-    if send_laundry_message(reservation.contact, text):
-        reservation.expired_message_sent_at = datetime.now()
-        return True
-    return False
-
-
 def send_auto_finish_message(reservation, location_name):
-    """세탁기 자동 완료 알림을 중복 없이 보낸다."""
+    """자동 완료 알림을 중복 없이 보낸다."""
     if reservation.auto_finish_message_sent_at:
         return False
 
+    machine = reservation.machine
+    machine_type = machine.type if machine else 'washer'
+    label = machine_type_label(machine_type)
+    minutes = auto_finish_minutes_for_type(machine_type)
     text = (
-        f"[세탁실] {reservation.name}님, {location_name} 세탁기 사용 시간이 "
-        f"{WASHER_AUTO_FINISH_MINUTES}분 지나 자동 완료 처리되었습니다."
+        f"{reservation.name}님, {location_name} {label} 사용 시간이 "
+        f"{minutes}분 지나 자동 완료 처리되었습니다."
     )
     if send_laundry_message(reservation.contact, text):
         reservation.auto_finish_message_sent_at = datetime.now()
@@ -617,9 +633,7 @@ def get_machine_stats(location_id, machine_type):
 
 def machine_usage_minutes(machine_type):
     """예상 대기 시간 계산에 사용할 1회 사용 시간을 반환한다."""
-    if machine_type == 'washer':
-        return WASHER_AUTO_FINISH_MINUTES
-    return DRYER_ESTIMATE_MINUTES
+    return auto_finish_minutes_for_type(machine_type)
 
 
 def ceil_minutes(value):
@@ -647,13 +661,9 @@ def remaining_minutes_for_holder(reservation, now=None):
 
     if reservation.is_checked_in:
         machine_type = reservation.machine.type if reservation.machine else 'washer'
-        if machine_type == 'washer':
-            start_time = reservation.started_at or reservation.notified_at or now
-            elapsed = (now - start_time).total_seconds() / 60
-            return ceil_minutes(WASHER_AUTO_FINISH_MINUTES - elapsed)
-
-        # 건조기는 사용자가 직접 종료해야 하므로 정확한 남은 시간을 알 수 없다.
-        return DRYER_ESTIMATE_MINUTES
+        start_time = reservation.started_at or reservation.notified_at or now
+        elapsed = (now - start_time).total_seconds() / 60
+        return ceil_minutes(auto_finish_minutes_for_type(machine_type) - elapsed)
 
     if reservation.notified_at:
         elapsed = (now - reservation.notified_at).total_seconds() / 60
@@ -665,8 +675,8 @@ def remaining_minutes_for_holder(reservation, now=None):
 def estimate_wait_minutes_for_group(location_id, machine_type, target_reservation=None, include_new_reservation=False):
     """같은 위치/종류 대기열에서 예상 대기 시간을 계산한다.
 
-    빈 기기, 호출 후 5분 노쇼 창, 세탁기 자동 완료 시간을 반영해 가볍게 시뮬레이션한다.
-    건조기는 자동 종료 시간이 없으므로 DRYER_ESTIMATE_MINUTES를 근사값으로 사용한다.
+    빈 기기, 호출 후 5분 노쇼 창, 기기별 자동 완료 시간을 반영해 가볍게 시뮬레이션한다.
+    세탁기와 건조기 모두 50분 자동 완료 기준으로 계산한다.
     """
     machines = Machine.query.filter_by(
         location_id=location_id,
@@ -720,18 +730,12 @@ def build_wait_estimate(location_id, machine_type, reservation=None, include_new
             return {'minutes': None, 'text': '예약이 종료되었습니다.', 'note': ''}
 
         if reservation.is_checked_in:
-            if machine_type == 'washer':
-                minutes = remaining_minutes_for_holder(reservation)
-                return {
-                    'minutes': minutes,
-                    'text': f'자동 완료까지 약 {minutes}분 남았습니다.',
-                    'note': f'{WASHER_AUTO_FINISH_MINUTES}분이 지나면 자동으로 완료 처리됩니다.'
-                }
-
+            minutes = remaining_minutes_for_holder(reservation)
+            auto_finish_minutes = auto_finish_minutes_for_type(machine_type)
             return {
-                'minutes': None,
-                'text': '건조기는 사용 종료 버튼을 누르면 완료됩니다.',
-                'note': '다음 사용자를 위해 사용이 끝나면 바로 종료해주세요.'
+                'minutes': minutes,
+                'text': f'자동 완료까지 약 {minutes}분 남았습니다.',
+                'note': f'{auto_finish_minutes}분이 지나면 자동으로 완료 처리됩니다.'
             }
 
         if reservation.notified_at:
@@ -752,8 +756,7 @@ def build_wait_estimate(location_id, machine_type, reservation=None, include_new
             return {'minutes': 0, 'text': '바로 사용 가능', 'note': ''}
         return {'minutes': 0, 'text': '곧 사용 가능할 예정입니다.', 'note': '상태가 바뀌면 문자로 알려드립니다.'}
 
-    note = '건조기는 사용자 종료 시점에 따라 실제 대기 시간이 달라질 수 있습니다.' if machine_type == 'dryer' else ''
-    return {'minutes': minutes, 'text': f'예상 대기 시간 약 {minutes}분', 'note': note}
+    return {'minutes': minutes, 'text': f'예상 대기 시간 약 {minutes}분', 'note': ''}
 
 
 def reservation_status_text(reservation):
@@ -770,7 +773,7 @@ def reservation_status_text(reservation):
     return '대기 중'
 
 
-def notify_next_waiting(machine):
+def notify_next_waiting(machine, send_sms=True):
     """특정 기기가 비었을 때 같은 장소/종류의 가장 오래된 대기자에게 배정."""
     next_person = waiting_reservations_for_group(
         machine.location_id,
@@ -783,61 +786,109 @@ def notify_next_waiting(machine):
         next_person.notified_at = datetime.now()
         machine.is_available = False
 
-        send_call_message(next_person)
+        if send_sms:
+            send_call_message(next_person)
         return next_person
 
     machine.is_available = True
     return None
 
 
-def cleanup_expired():
+def _send_cleanup_messages(message_jobs):
+    """DB 정리 commit 이후에 문자만 따로 보낸다.
+
+    SQLite 쓰기 트랜잭션을 잡은 채 외부 API를 기다리지 않기 위해
+    cleanup 단계에서는 보낼 문자 목록만 모으고, commit 후 여기서 발송한다.
+    """
+    sent_count = 0
+
+    for job in message_jobs:
+        kind = job.get('kind')
+        reservation = db.session.get(Reservation, job.get('reservation_id'))
+        if not reservation:
+            continue
+
+        if kind == 'call':
+            if send_call_message(reservation):
+                sent_count += 1
+        elif kind == 'auto_finish':
+            if send_auto_finish_message(reservation, job.get('location_name', '세탁실')):
+                sent_count += 1
+
+    if sent_count:
+        db.session.commit()
+
+    return sent_count
+
+
+def cleanup_expired(limit=1, send_sms=True):
+    """호출 후 5분이 지난 미시작 예약을 정리한다.
+
+    무료 계정에서는 웹 요청 안에서 실행되므로 한 번에 limit건만 처리한다.
+    """
     now = datetime.now()
-    expired_users = Reservation.query.filter(
+    processed_count = 0
+    message_jobs = []
+
+    candidates = Reservation.query.filter(
         Reservation.notified_at != None,
         Reservation.is_checked_in == False,
         Reservation.is_completed == False,
         Reservation.is_expired == False,
         Reservation.is_cancelled == False
-    ).all()
+    ).order_by(Reservation.notified_at).all()
 
-    for user in expired_users:
+    for user in candidates:
         time_diff = (now - user.notified_at).total_seconds() / 60
-        if time_diff >= 5:
-            machine = user.machine
-            label = machine_type_label(machine.type) if machine else "기기"
-            location_name = machine.location.name if machine else "세탁실"
+        if time_diff < 5:
+            continue
 
-            user.is_expired = True
-            user.is_completed = True
-            db.session.flush()
+        machine = user.machine
 
-            if machine:
-                notify_next_waiting(machine)
+        user.is_expired = True
+        user.is_completed = True
+        db.session.flush()
 
-            db.session.commit()
-            send_expired_message(user, location_name, label)
-            db.session.commit()
+        if machine:
+            next_person = notify_next_waiting(machine, send_sms=False)
+            if next_person:
+                message_jobs.append({'kind': 'call', 'reservation_id': next_person.id})
+
+        # 노쇼 자동 취소자는 별도 취소 알림 문자를 보내지 않는다.
+        processed_count += 1
+
+        if processed_count >= limit:
+            break
+
+    if processed_count:
+        db.session.commit()
+        if send_sms:
+            _send_cleanup_messages(message_jobs)
+
+    return processed_count
 
 
-def send_upcoming_washer_notices():
-    """세탁기 자동 완료 5분 전 다음 대기자에게 준비 알림을 보낸다.
+def send_upcoming_auto_finish_notices(limit=1):
+    """자동 완료 5분 전 사전 알림.
 
-    한 위치에서 여러 세탁기가 곧 끝날 수 있으므로, 곧 비는 세탁기 수만큼
-    앞쪽 대기자에게 알림을 보낸다. 실제 사용 가능 시점에는 기존 사용 가능
-    알림이 다시 발송된다.
+    PythonAnywhere 무료 계정에서는 진짜 백그라운드 실행이 없으므로 기본적으로 끈다.
+    사전 알림보다 노쇼 정리/자동 완료/다음 사람 호출이 더 중요하다.
     """
-    now = datetime.now()
-    upcoming_slots_by_location = {}
+    if not ENABLE_PRE_CALL_NOTICES:
+        return 0
 
-    using_washers = Reservation.query.join(Machine).filter(
-        Machine.type == 'washer',
+    now = datetime.now()
+    upcoming_slots_by_group = {}
+
+    using_reservations = Reservation.query.join(Machine).filter(
+        Machine.type.in_(AUTO_FINISH_MACHINE_TYPES),
         Reservation.is_checked_in == True,
         Reservation.is_completed == False,
         Reservation.is_expired == False,
         Reservation.is_cancelled == False
     ).all()
 
-    for reservation in using_washers:
+    for reservation in using_reservations:
         machine = reservation.machine
         if not machine:
             continue
@@ -847,100 +898,196 @@ def send_upcoming_washer_notices():
             continue
 
         elapsed_minutes = (now - start_time).total_seconds() / 60
-        remaining_minutes = WASHER_AUTO_FINISH_MINUTES - elapsed_minutes
+        remaining_minutes = auto_finish_minutes_for_type(machine.type) - elapsed_minutes
 
-        if 0 < remaining_minutes <= WASHER_PRE_NOTICE_BEFORE_MINUTES:
-            upcoming_slots_by_location[machine.location_id] = upcoming_slots_by_location.get(machine.location_id, 0) + 1
+        if 0 < remaining_minutes <= PRE_NOTICE_BEFORE_MINUTES:
+            key = (machine.location_id, machine.type)
+            upcoming_slots_by_group[key] = upcoming_slots_by_group.get(key, 0) + 1
 
-    for location_id, slot_count in upcoming_slots_by_location.items():
+    sent_count = 0
+    for (location_id, machine_type), slot_count in upcoming_slots_by_group.items():
         location = db.session.get(Location, location_id)
         location_name = location.name if location else '세탁실'
         next_waiters = waiting_reservations_for_group(
             location_id,
-            'washer'
-        ).limit(slot_count).all()
+            machine_type
+        ).limit(min(slot_count, max(0, limit - sent_count))).all()
 
         for waiter in next_waiters:
-            send_pre_call_message(waiter, location_name)
+            if send_pre_call_message(waiter, location_name, machine_type):
+                sent_count += 1
+            if sent_count >= limit:
+                break
 
-    db.session.commit()
+        if sent_count >= limit:
+            break
+
+    if sent_count:
+        db.session.commit()
+
+    return sent_count
 
 
-def cleanup_finished_washers():
-    """사용 시작 후 50분이 지난 세탁기 예약을 자동 완료 처리한다."""
+def cleanup_finished_machines(limit=1, send_sms=True):
+    """사용 시작 후 50분이 지난 세탁기/건조기 예약을 자동 완료 처리한다.
+
+    무료 계정에서는 웹 요청 안에서 실행되므로 한 번에 limit건만 처리한다.
+    """
     now = datetime.now()
-    using_washers = Reservation.query.join(Machine).filter(
-        Machine.type == 'washer',
+    processed_count = 0
+    message_jobs = []
+
+    using_reservations = Reservation.query.join(Machine).filter(
+        Machine.type.in_(AUTO_FINISH_MACHINE_TYPES),
         Reservation.is_checked_in == True,
         Reservation.is_completed == False,
         Reservation.is_expired == False,
         Reservation.is_cancelled == False
-    ).all()
+    ).order_by(Reservation.started_at, Reservation.notified_at).all()
 
-    for reservation in using_washers:
-        # 새 버전에서는 started_at을 사용하고, 기존 진행 중 예약은 notified_at을 보조 기준으로 쓴다.
+    for reservation in using_reservations:
         start_time = reservation.started_at or reservation.notified_at
         if start_time is None:
             reservation.started_at = now
             continue
 
+        machine = reservation.machine
+        machine_type = machine.type if machine else 'washer'
+        auto_finish_minutes = auto_finish_minutes_for_type(machine_type)
+
         elapsed_minutes = (now - start_time).total_seconds() / 60
-        if elapsed_minutes < WASHER_AUTO_FINISH_MINUTES:
+        if elapsed_minutes < auto_finish_minutes:
             continue
 
-        machine = reservation.machine
         location_name = machine.location.name if machine and machine.location else '세탁실'
 
         reservation.is_completed = True
         db.session.flush()
 
         if machine:
-            notify_next_waiting(machine)
+            next_person = notify_next_waiting(machine, send_sms=False)
+            if next_person:
+                message_jobs.append({'kind': 'call', 'reservation_id': next_person.id})
 
-        send_auto_finish_message(reservation, location_name)
+        message_jobs.append({
+            'kind': 'auto_finish',
+            'reservation_id': reservation.id,
+            'location_name': location_name,
+        })
+        processed_count += 1
 
-    db.session.commit()
+        if processed_count >= limit:
+            break
+
+    if processed_count:
+        db.session.commit()
+        if send_sms:
+            _send_cleanup_messages(message_jobs)
+    else:
+        # started_at을 보정한 경우가 있을 수 있다.
+        db.session.commit()
+
+    return processed_count
 
 
-def run_cleanup_tasks(remove_session=False):
-    """노쇼와 세탁기 자동 완료를 한 번에 정리한다."""
+def run_cleanup_tasks(remove_session=False, max_items=MAX_CLEANUP_ITEMS_PER_REQUEST):
+    """노쇼와 세탁기/건조기 자동 완료를 한 번에 정리한다.
+
+    웹 요청 안에서 실행될 수 있으므로 처리량을 제한한다. 반환값은 로그와
+    cleanup-ping 응답에서 상태를 확인하기 위한 간단한 통계다.
+    """
     acquired = _cleanup_lock.acquire(blocking=False)
     if not acquired:
-        return
+        return {'skipped': True, 'reason': 'already_running'}
+
+    result = {
+        'skipped': False,
+        'expired': 0,
+        'pre_notices': 0,
+        'finished_machines': 0,
+    }
 
     try:
-        cleanup_expired()
-        send_upcoming_washer_notices()
-        cleanup_finished_washers()
+        budget = max(1, int(max_items or 1))
+
+        result['expired'] = cleanup_expired(limit=budget)
+        budget -= result['expired']
+
+        if budget > 0:
+            result['pre_notices'] = send_upcoming_auto_finish_notices(limit=budget)
+            budget -= result['pre_notices']
+
+        if budget > 0:
+            result['finished_machines'] = cleanup_finished_machines(limit=budget)
+
+        return result
+    except Exception as e:
+        db.session.rollback()
+        print(f"자동 정리 실패: {e}")
+        return {'skipped': True, 'reason': 'error', 'error': repr(e)}
     finally:
         if remove_session:
             db.session.remove()
         _cleanup_lock.release()
 
 
-def cleanup_worker():
-    """서버가 켜져 있는 동안 주기적으로 자동 정리를 수행한다."""
-    while True:
-        with app.app_context():
-            run_cleanup_tasks(remove_session=True)
-        time.sleep(CLEANUP_INTERVAL_SECONDS)
+def should_run_cleanup_for_request():
+    """자동 정리를 얹어도 괜찮은 가벼운 GET 화면인지 확인한다."""
+    if request.method != 'GET':
+        return False
+
+    return request.endpoint in {
+        'dashboard',
+        'select_location',
+        'machines',
+        'my_status',
+        'admin',
+    }
 
 
-def start_cleanup_worker():
-    global _cleanup_worker_started
+def maybe_run_cleanup_from_web_request(force=False):
+    """PythonAnywhere 무료 계정용 lazy cleanup.
 
-    if _cleanup_worker_started:
-        return
+    백그라운드 스레드 없이 웹 요청이 들어올 때만 실행한다. 사이트가 멈춰 보이지
+    않도록 최소 실행 간격을 둔다.
+    """
+    global _last_web_cleanup_at
 
-    _cleanup_worker_started = True
-    worker = threading.Thread(target=cleanup_worker, daemon=True)
-    worker.start()
+    if not force and not should_run_cleanup_for_request():
+        return None
+
+    now = time.monotonic()
+    if not force and (now - _last_web_cleanup_at) < WEB_CLEANUP_MIN_INTERVAL_SECONDS:
+        return None
+
+    _last_web_cleanup_at = now
+    return run_cleanup_tasks(max_items=MAX_CLEANUP_ITEMS_PER_REQUEST)
 
 
 @app.before_request
 def before_request():
-    # 백그라운드 작업자가 놓친 경우에도 화면 접근 시 한 번 더 정리한다.
-    run_cleanup_tasks()
+    # PythonAnywhere 무료 계정에서는 스레드를 만들지 않는다.
+    # 대신 사용자가 주요 화면을 볼 때만 짧게 정리한다.
+    maybe_run_cleanup_from_web_request()
+
+
+@app.route('/cleanup-ping')
+def cleanup_ping():
+    """외부 모니터나 로그인한 사용자가 호출할 수 있는 정리 트리거.
+
+    - 로그인한 사용자의 브라우저에서는 토큰 없이 호출 가능
+    - 외부 HTTP 모니터를 붙일 경우 LAUNDRY_CLEANUP_TOKEN 값을 설정하고
+      /cleanup-ping?token=... 형태로 호출한다.
+    """
+    cleanup_token = get_setting(['LAUNDRY_CLEANUP_TOKEN', 'CLEANUP_TOKEN'], '')
+    provided_token = request.args.get('token') or ''
+
+    if not require_logged_in():
+        if not cleanup_token or not secrets.compare_digest(provided_token, cleanup_token):
+            abort(403)
+
+    result = run_cleanup_tasks(remove_session=True, max_items=MAX_CLEANUP_ITEMS_PER_REQUEST)
+    return {'ok': True, 'result': result}
 
 
 # --- 라우팅 ---
@@ -1166,8 +1313,6 @@ def reserve():
         access_token=create_access_token()
     )
 
-    label = machine_type_label(machine_type)
-
     if available_machine:
         available_machine.is_available = False
         new_res.notified_at = datetime.now()
@@ -1175,12 +1320,12 @@ def reserve():
     db.session.add(new_res)
     db.session.flush()
 
-    if available_machine:
-        send_call_message(new_res)
-
+    status_url = reservation_status_url(new_res)
     db.session.commit()
 
-    return redirect(reservation_status_url(new_res))
+    # 빈 기기가 있어 바로 사용 가능한 예약은 문자 호출을 보내지 않는다.
+    # 대기하다가 실제 차례가 온 예약만 notify_next_waiting()을 통해 문자를 받는다.
+    return redirect(status_url)
 
 
 @app.route('/my_status/<int:res_id>')
@@ -1236,7 +1381,7 @@ def my_status(res_id, access_token):
         location=machine.location,
         type_label=label,
         type_code=machine_type,
-        auto_finish_minutes=WASHER_AUTO_FINISH_MINUTES,
+        auto_finish_minutes=auto_finish_minutes_for_type(machine_type),
         my_rank=my_rank,
         can_start=can_start,
         can_cancel=can_cancel_reservation(user_res),
@@ -1540,8 +1685,6 @@ def admin_finish_reservation_action(res_id):
 
     return redirect(url_for('admin'))
 
-
-start_cleanup_worker()
 
 if __name__ == '__main__':
     app.run(debug=True, use_reloader=False)

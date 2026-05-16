@@ -122,14 +122,6 @@
     {% endfor %}
 </section>
 
-<section class="card dashboard-guide">
-    <span>🔒</span>
-    <span>
-        <strong>내 예약만 볼 수 있어요</strong>
-        상태 페이지는 로그인한 휴대폰 번호와 예약별 보안 토큰이 맞을 때만 열립니다.
-    </span>
-</section>
-
 {% if can_select_location %}
 <div class="bottom-action">
     <a href="{{ url_for('select_location') }}" class="btn btn-ghost">다른 장소 선택하기</a>

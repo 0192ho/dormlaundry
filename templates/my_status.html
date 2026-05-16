@@ -218,11 +218,6 @@
         <p class="status-desc">이용해주셔서 감사합니다.</p>
     {% elif res.is_checked_in %}
         <h1 class="status-main primary">사용 중 🌀</h1>
-        {% if type_code == 'washer' %}
-            <p class="status-desc">세탁기는 사용 시작 후 {{ auto_finish_minutes }}분이 지나면 자동으로 사용 완료 처리됩니다.</p>
-        {% else %}
-            <p class="status-desc">사용이 끝나면 아래 버튼을 눌러 다음 사람에게 알려주세요.</p>
-        {% endif %}
         <form class="status-action" action="{{ url_for('finish_laundry', res_id=res.id, access_token=access_token) }}" method="POST">
             <button type="submit" class="btn btn-danger">사용 종료</button>
         </form>
