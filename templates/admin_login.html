@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}관리자 로그인{% endblock %}
+{% block topbar_title %}관리자{% endblock %}
+{% block topbar_left %}<a href="{{ url_for('login') }}" class="icon-button" aria-label="로그인으로 이동">‹</a>{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <div class="kicker">🔧 관리자</div>
+    <h1>관리자 화면에<br>접속합니다.</h1>
+    <p class="page-desc">예약이 꼬였을 때 기기 상태와 대기열을 간단히 초기화할 수 있습니다.</p>
+</section>
+
+<section class="card card-pad">
+    {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+    {% endif %}
+
+    {% if not password_not_set %}
+    <form method="POST" class="stack">
+        <div class="form-row">
+            <label class="field-label" for="password">관리자 비밀번호</label>
+            <input class="field" id="password" type="password" name="password" placeholder="비밀번호" required>
+        </div>
+        <button type="submit" class="btn btn-primary">관리자 로그인</button>
+    </form>
+    {% else %}
+        <p class="helper">PythonAnywhere 환경 변수 또는 app.py 상단의 <b>DEFAULT_ADMIN_PASSWORD</b> 값을 먼저 설정해주세요.</p>
+    {% endif %}
+</section>
+{% endblock %}

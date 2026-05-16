@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}내 예약 대시보드{% endblock %}
+{% block topbar_title %}내 예약{% endblock %}
+{% block topbar_left %}
+{% if can_select_location %}
+    <a href="{{ url_for('select_location') }}" class="icon-button" aria-label="위치 선택으로 이동">‹</a>
+{% else %}
+    <span class="topbar-spacer" aria-hidden="true"></span>
+{% endif %}
+{% endblock %}
+
+{% block topbar_right %}<a href="{{ url_for('logout') }}" class="text-button" aria-label="로그아웃">나가기</a>{% endblock %}
+
+{% block extra_style %}
+<style>
+    .dashboard-head {
+        margin-bottom: 18px;
+    }
+
+    .reservation-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 13px;
+    }
+
+    .reservation-card {
+        min-height: 116px;
+        padding: 18px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        border-radius: 24px;
+        background: #FFFFFF;
+        border: 1px solid var(--line);
+        box-shadow: 0 12px 26px rgba(23, 32, 51, 0.06);
+        transition: transform 0.15s ease;
+    }
+
+    .reservation-card:active {
+        transform: scale(0.985);
+    }
+
+    .reservation-icon {
+        width: 54px;
+        height: 54px;
+        flex: 0 0 54px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 18px;
+        background: var(--primary-weak);
+        font-size: 25px;
+    }
+
+    .reservation-body {
+        min-width: 0;
+        flex: 1;
+    }
+
+    .reservation-title {
+        display: block;
+        color: var(--ink);
+        font-size: 18px;
+        font-weight: 950;
+        letter-spacing: -0.04em;
+    }
+
+    .reservation-sub {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+    }
+
+    .dashboard-guide {
+        margin-top: 16px;
+        padding: 16px;
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+    }
+
+    .dashboard-guide strong {
+        display: block;
+        margin-bottom: 3px;
+        color: var(--ink);
+        font-size: 14px;
+    }
+
+    .bottom-action {
+        margin-top: 16px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="page-head dashboard-head">
+    <div class="kicker">🧺 {{ name }}님의 예약</div>
+    <h1>진행 중인 예약을<br>확인하세요.</h1>
+    <p class="page-desc">세탁기와 건조기는 각각 한 대씩만 동시에 예약할 수 있습니다.</p>
+</section>
+
+<section class="reservation-stack" aria-label="내 활성 예약 목록">
+    {% for item in reservations %}
+        <a class="reservation-card" href="{{ item.url }}">
+            <span class="reservation-icon">{% if item.type_label == '세탁기' %}👕{% else %}💨{% endif %}</span>
+            <span class="reservation-body">
+                <strong class="reservation-title">{{ item.type_label }}</strong>
+                <small class="reservation-sub">
+                    {{ item.location_name }}
+                    {% if item.estimate %}<br>{{ item.estimate.text }}{% endif %}
+                </small>
+            </span>
+            <span class="pill {{ item.pill_class }}">{{ item.status_text }}</span>
+            <span class="chevron">›</span>
+        </a>
+    {% endfor %}
+</section>
+
+<section class="card dashboard-guide">
+    <span>🔒</span>
+    <span>
+        <strong>내 예약만 볼 수 있어요</strong>
+        상태 페이지는 로그인한 휴대폰 번호와 예약별 보안 토큰이 맞을 때만 열립니다.
+    </span>
+</section>
+
+{% if can_select_location %}
+<div class="bottom-action">
+    <a href="{{ url_for('select_location') }}" class="btn btn-ghost">다른 장소 선택하기</a>
+</div>
+{% endif %}
+{% endblock %}

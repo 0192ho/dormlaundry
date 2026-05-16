@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}세탁실 위치 선택{% endblock %}
+{% block topbar_title %}위치 선택{% endblock %}
+{% block topbar_right %}<a href="{{ url_for('logout') }}" class="text-button" aria-label="로그아웃">나가기</a>{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <div class="kicker">📍 세탁실 선택</div>
+    <h1>{% if name %}{{ name }}님,<br>{% endif %}어디에서 사용할까요?</h1>
+    <p class="page-desc">현재 이용하려는 세탁실 위치를 선택하면 세탁기와 건조기 현황을 볼 수 있습니다.</p>
+</section>
+
+<section class="stack" aria-label="세탁실 위치 목록">
+    {% for loc in locations %}
+        <a href="{{ url_for('machines', location_id=loc.id) }}" class="list-card">
+            <span class="list-icon">🏢</span>
+            <span class="list-main">
+                <strong>{{ loc.name }}</strong>
+                <small>세탁기·건조기 예약하기</small>
+            </span>
+            <span class="chevron">›</span>
+        </a>
+    {% endfor %}
+</section>
+{% endblock %}

@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+
+{% block title %}기기 선택{% endblock %}
+{% block topbar_title %}기기 선택{% endblock %}
+{% block topbar_left %}<a href="{{ url_for('select_location') }}" class="icon-button" aria-label="뒤로가기">‹</a>{% endblock %}
+{% block topbar_right %}<a href="{{ url_for('logout') }}" class="text-button" aria-label="로그아웃">나가기</a>{% endblock %}
+
+{% block extra_style %}
+<style>
+    .location-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 13px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: #FFFFFF;
+        color: var(--primary-dark);
+        border: 1px solid var(--line);
+        font-size: 14px;
+        font-weight: 850;
+        box-shadow: 0 8px 18px rgba(23, 32, 51, 0.05);
+    }
+
+    .device-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 13px;
+        margin-top: 22px;
+    }
+
+    .device-form {
+        margin: 0;
+        min-width: 0;
+    }
+
+    .device-card {
+        position: relative;
+        width: 100%;
+        min-height: 184px;
+        padding: 18px 12px;
+        border: 1px solid var(--line);
+        border-radius: 25px;
+        background: #FFFFFF;
+        box-shadow: 0 14px 28px rgba(23, 32, 51, 0.07);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .device-card:active {
+        transform: scale(0.985);
+    }
+
+    .device-card.is-available {
+        border-color: rgba(63, 123, 255, 0.32);
+    }
+
+    .device-card.is-waiting {
+        border-color: rgba(247, 144, 9, 0.32);
+    }
+
+    .device-card:disabled {
+        opacity: 0.48;
+        cursor: not-allowed;
+        box-shadow: none;
+    }
+
+    .device-icon {
+        width: 58px;
+        height: 58px;
+        margin-bottom: 13px;
+        border-radius: 20px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--surface-soft);
+        font-size: 33px;
+    }
+
+    .device-name {
+        color: var(--ink);
+        font-size: 22px;
+        font-weight: 900;
+        letter-spacing: -0.05em;
+    }
+
+    .device-meta {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.4;
+        min-height: 37px;
+    }
+
+    .device-card.is-available .device-meta {
+        color: var(--primary-dark);
+    }
+
+    .device-card.is-waiting .device-meta {
+        color: #B54708;
+    }
+
+    .estimate-line {
+        display: inline-block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+    }
+
+    .info-card {
+        margin-top: 16px;
+        padding: 16px;
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+    }
+
+    .info-card strong {
+        display: block;
+        margin-bottom: 3px;
+        color: var(--ink);
+        font-size: 14px;
+    }
+
+    @media (max-width: 360px) {
+        .device-grid {
+            gap: 10px;
+        }
+
+        .device-card {
+            min-height: 170px;
+            border-radius: 22px;
+        }
+
+        .device-name {
+            font-size: 20px;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <div class="location-chip">📍 {{ location.name }}</div>
+    <h1>어떤 기기를<br>예약하시겠어요?</h1>
+    <p class="page-desc">기기 번호는 고르지 않아도 됩니다. 빈 기기가 있으면 자동으로 한 대가 배정됩니다.</p>
+</section>
+
+<section class="device-grid" aria-label="기기 종류 선택">
+    {% for card in cards %}
+    <form method="POST" action="{{ url_for('reserve') }}" class="device-form">
+        <input type="hidden" name="location_id" value="{{ location.id }}">
+        <input type="hidden" name="machine_type" value="{{ card.type }}">
+
+        <button type="submit"
+                class="device-card {% if card.total == 0 %}is-disabled{% elif card.available > 0 %}is-available{% else %}is-waiting{% endif %}"
+                {% if card.total == 0 %}disabled{% endif %}>
+            <span class="device-icon">{{ card.icon }}</span>
+            <span class="device-name">{{ card.label }}</span>
+            <span class="device-meta">
+                {% if card.total == 0 %}
+                    설치된 기기 없음
+                {% elif card.available > 0 %}
+                    빈 {{ card.label }} {{ card.available }}대<br>바로 사용 가능
+                {% else %}
+                    모두 사용 중<br>대기 {{ card.waiting }}명
+                {% endif %}
+                {% if card.estimate and card.total > 0 %}
+                    <br><span class="estimate-line">{{ card.estimate.text }}</span>
+                {% endif %}
+            </span>
+        </button>
+    </form>
+    {% endfor %}
+</section>
+
+<section class="card info-card">
+    <span>💡</span>
+    <span>
+        <strong>예약 방식</strong>
+        빈 기기가 없으면 같은 위치의 같은 종류 대기열에 등록되고, 차례가 되면 문자로 알려드립니다.
+    </span>
+</section>
+{% endblock %}

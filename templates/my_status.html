@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+
+{% block title %}나의 예약 상태{% endblock %}
+{% block extra_head %}
+{% if res.is_checked_in and not res.is_completed %}
+    <meta http-equiv="refresh" content="60">
+{% endif %}
+{% endblock %}
+{% block topbar_title %}나의 예약{% endblock %}
+{% block topbar_left %}
+{% if can_select_location %}
+    <a href="{{ url_for('select_location') }}" class="icon-button" aria-label="위치 선택으로 이동">‹</a>
+{% else %}
+    <a href="{{ url_for('dashboard') }}" class="icon-button" aria-label="내 예약 대시보드로 이동">‹</a>
+{% endif %}
+{% endblock %}
+
+{% block topbar_right %}<a href="{{ url_for('logout') }}" class="text-button" aria-label="로그아웃">나가기</a>{% endblock %}
+
+{% block extra_style %}
+<style>
+    .status-hero {
+        padding: 22px 20px;
+        text-align: center;
+        border-radius: 28px;
+        overflow: hidden;
+        position: relative;
+    }
+
+    .status-hero::before {
+        content: "";
+        position: absolute;
+        inset: -60px -90px auto auto;
+        width: 190px;
+        height: 190px;
+        border-radius: 999px;
+        background: rgba(63, 123, 255, 0.08);
+    }
+
+    .status-context {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 12px;
+        padding: 7px 11px;
+        border-radius: 999px;
+        background: var(--surface-soft);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 850;
+    }
+
+    .status-main {
+        position: relative;
+        margin: 0;
+        font-size: 37px;
+        line-height: 1.1;
+        font-weight: 950;
+        letter-spacing: -0.07em;
+    }
+
+    .status-main.primary { color: var(--primary-dark); }
+    .status-main.success { color: var(--success); }
+    .status-main.danger { color: var(--danger); }
+    .status-main.warning { color: var(--warning); }
+
+    .status-desc {
+        position: relative;
+        margin: 10px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+    }
+
+    .status-action {
+        position: relative;
+        margin-top: 18px;
+    }
+
+    .stats-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+    }
+
+    .stat-card {
+        padding: 15px;
+        border-radius: 20px;
+        background: #FFFFFF;
+        border: 1px solid var(--line);
+        box-shadow: 0 10px 20px rgba(23, 32, 51, 0.045);
+    }
+
+    .stat-label {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+    }
+
+    .stat-value {
+        margin-top: 7px;
+        color: var(--ink);
+        font-size: 24px;
+        font-weight: 950;
+        letter-spacing: -0.04em;
+    }
+
+    .stat-value.primary { color: var(--primary-dark); }
+    .stat-value.danger { color: var(--danger); }
+    .stat-value.warning { color: var(--warning); }
+
+    .reservation-list {
+        overflow: hidden;
+    }
+
+    .reservation-row {
+        min-height: 62px;
+        padding: 14px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+    }
+
+    .reservation-row:last-child {
+        border-bottom: 0;
+    }
+
+    .person {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .rank {
+        width: 31px;
+        height: 31px;
+        flex: 0 0 31px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 12px;
+        background: var(--surface-soft);
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 900;
+    }
+
+    .person-name {
+        min-width: 0;
+        color: var(--ink);
+        font-size: 15px;
+        font-weight: 850;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .empty-message {
+        padding: 28px 16px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 14px;
+        line-height: 1.5;
+    }
+
+    .bottom-action {
+        margin-top: 16px;
+    }
+
+    .cancel-action {
+        margin-top: 10px;
+    }
+
+    .estimate-card {
+        padding: 16px;
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+    }
+
+    .estimate-card strong {
+        display: block;
+        color: var(--ink);
+        font-size: 16px;
+        font-weight: 900;
+        letter-spacing: -0.03em;
+    }
+
+    .estimate-card small {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="card status-hero">
+    <div class="status-context">📍 {{ location.name }} · {{ type_label }}</div>
+
+    {% if res.is_cancelled %}
+        <h1 class="status-main danger">예약 취소됨</h1>
+        <p class="status-desc">직접 취소한 예약입니다.</p>
+    {% elif res.is_expired %}
+        <h1 class="status-main danger">예약 취소됨</h1>
+        <p class="status-desc">5분 안에 사용 시작을 누르지 않아 자동 취소되었습니다.</p>
+    {% elif res.is_completed %}
+        <h1 class="status-main success">사용 완료</h1>
+        <p class="status-desc">이용해주셔서 감사합니다.</p>
+    {% elif res.is_checked_in %}
+        <h1 class="status-main primary">사용 중 🌀</h1>
+        {% if type_code == 'washer' %}
+            <p class="status-desc">세탁기는 사용 시작 후 {{ auto_finish_minutes }}분이 지나면 자동으로 사용 완료 처리됩니다.</p>
+        {% else %}
+            <p class="status-desc">사용이 끝나면 아래 버튼을 눌러 다음 사람에게 알려주세요.</p>
+        {% endif %}
+        <form class="status-action" action="{{ url_for('finish_laundry', res_id=res.id, access_token=access_token) }}" method="POST">
+            <button type="submit" class="btn btn-danger">사용 종료</button>
+        </form>
+    {% else %}
+        <p class="status-desc" style="margin-top: 0;">{{ res.name }}님의 순번</p>
+        <h1 class="status-main warning">{{ my_rank }}번</h1>
+
+        {% if can_start %}
+            <p class="status-desc" style="color: var(--success); font-weight: 850;">지금 바로 사용 가능합니다.</p>
+            <form class="status-action" action="{{ url_for('start_laundry', res_id=res.id, access_token=access_token) }}" method="POST">
+                <button type="submit" class="btn btn-success">사용 시작</button>
+            </form>
+        {% else %}
+            <div class="status-action">
+                <button class="btn btn-muted" disabled>차례가 되면 버튼이 열립니다</button>
+            </div>
+        {% endif %}
+
+        {% if can_cancel %}
+            <form class="cancel-action" action="{{ url_for('cancel_reservation', res_id=res.id, access_token=access_token) }}" method="POST" onsubmit="return confirm('예약을 취소할까요?');">
+                <button type="submit" class="btn btn-danger-soft">예약 취소</button>
+            </form>
+        {% endif %}
+    {% endif %}
+</section>
+
+{% if wait_estimate %}
+<h2 class="section-title">예상 시간</h2>
+<section class="card estimate-card">
+    <span>⏱️</span>
+    <span>
+        <strong>{{ wait_estimate.text }}</strong>
+        {% if wait_estimate.note %}<small>{{ wait_estimate.note }}</small>{% endif %}
+    </span>
+</section>
+{% endif %}
+
+<h2 class="section-title">{{ location.name }} {{ type_label }} 현황</h2>
+<section class="stats-grid" aria-label="기기 현황">
+    <div class="stat-card">
+        <div class="stat-label">전체 {{ type_label }}</div>
+        <div class="stat-value">{{ total }}대</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">빈 {{ type_label }}</div>
+        <div class="stat-value primary">{{ empty }}대</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">예약/사용 중</div>
+        <div class="stat-value danger">{{ using }}대</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">대기 인원</div>
+        <div class="stat-value warning">{{ waiting_count }}명</div>
+    </div>
+</section>
+
+<h2 class="section-title">{{ type_label }} 예약 명단</h2>
+<section class="card reservation-list" aria-label="예약 명단">
+    {% if waiting_list %}
+        {% for person in waiting_list %}
+            <div class="reservation-row">
+                <div class="person">
+                    <span class="rank">{{ loop.index }}</span>
+                    <span class="person-name">{{ person.name }}</span>
+                    {% if person.id == res.id %}<span class="pill pill-warning">나</span>{% endif %}
+                </div>
+
+                {% if person.is_checked_in %}
+                    <span class="pill pill-primary">사용 중</span>
+                {% elif person.notified_at %}
+                    <span class="pill pill-success">호출됨</span>
+                {% else %}
+                    <span class="pill">대기 중</span>
+                {% endif %}
+            </div>
+        {% endfor %}
+    {% else %}
+        <div class="empty-message">현재 예약자가 없습니다.</div>
+    {% endif %}
+</section>
+
+<div class="bottom-action stack">
+    <a href="{{ url_for('dashboard') }}" class="btn btn-ghost">내 예약 모아보기</a>
+    {% if can_select_location %}
+        <a href="{{ url_for('select_location') }}" class="btn btn-ghost">다른 장소 선택하기</a>
+    {% endif %}
+</div>
+{% endblock %}

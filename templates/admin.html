@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block title %}관리자 초기화{% endblock %}
+{% block topbar_title %}관리자{% endblock %}
+{% block topbar_left %}<a href="{{ url_for('dashboard') }}" class="icon-button" aria-label="내 예약으로 이동">‹</a>{% endblock %}
+{% block topbar_right %}<a href="{{ url_for('admin_logout') }}" class="text-button" aria-label="관리자 로그아웃">나가기</a>{% endblock %}
+
+{% block extra_style %}
+<style>
+    .admin-notice {
+        margin-bottom: 14px;
+        padding: 13px 14px;
+        border-radius: 16px;
+        color: #087443;
+        background: var(--success-weak);
+        border: 1px solid rgba(23, 178, 106, 0.18);
+        font-size: 14px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
+    .admin-card {
+        padding: 16px;
+    }
+
+    .admin-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+    }
+
+    .admin-main {
+        min-width: 0;
+        flex: 1;
+    }
+
+    .admin-title {
+        display: block;
+        color: var(--ink);
+        font-size: 16px;
+        font-weight: 950;
+        letter-spacing: -0.03em;
+    }
+
+    .admin-sub {
+        display: block;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+    }
+
+    .admin-meta {
+        margin-top: 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+    }
+
+    .admin-form {
+        margin-top: 12px;
+    }
+
+    .btn-small {
+        min-height: 42px;
+        border-radius: 14px;
+        font-size: 14px;
+    }
+
+    .danger-zone {
+        padding: 16px;
+        border-color: rgba(240, 68, 56, 0.24);
+        background: #FFFFFF;
+    }
+
+    .empty-message {
+        padding: 24px 16px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 14px;
+        line-height: 1.5;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <div class="kicker">🔧 관리자</div>
+    <h1>기기 상태를<br>간단히 정리하세요.</h1>
+    <p class="page-desc">잘못 남은 예약이나 사용 중 상태를 운영자가 직접 초기화할 수 있습니다.</p>
+</section>
+
+{% if notice %}
+    <div class="admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card danger-zone">
+    <div class="admin-row">
+        <div class="admin-main">
+            <strong class="admin-title">전체 초기화</strong>
+            <small class="admin-sub">모든 활성 예약을 종료하고 모든 기기를 사용 가능 상태로 바꿉니다.</small>
+        </div>
+    </div>
+    <form class="admin-form" method="POST" action="{{ url_for('admin_reset_all') }}" onsubmit="return confirm('정말 전체 초기화를 진행할까요?');">
+        <button type="submit" class="btn btn-danger btn-small">전체 초기화</button>
+    </form>
+</section>
+
+<h2 class="section-title">위치별 초기화</h2>
+<section class="stack">
+    {% for item in groups %}
+    <div class="card admin-card">
+        <div class="admin-row">
+            <div class="admin-main">
+                <strong class="admin-title">{{ item.icon }} {{ item.location.name }} · {{ item.label }}</strong>
+                <small class="admin-sub">{{ item.estimate.text if item.estimate else '예상 시간 없음' }}</small>
+                <div class="admin-meta">
+                    <span class="pill">전체 {{ item.stats.total }}대</span>
+                    <span class="pill pill-primary">빈 기기 {{ item.stats.available }}대</span>
+                    <span class="pill pill-warning">대기 {{ item.stats.waiting }}명</span>
+                </div>
+            </div>
+        </div>
+        <form class="admin-form" method="POST" action="{{ url_for('admin_reset_group_action') }}" onsubmit="return confirm('이 위치의 {{ item.label }} 예약을 초기화할까요?');">
+            <input type="hidden" name="location_id" value="{{ item.location.id }}">
+            <input type="hidden" name="machine_type" value="{{ item.type }}">
+            <button type="submit" class="btn btn-ghost btn-small">이 {{ item.label }} 초기화</button>
+        </form>
+    </div>
+    {% endfor %}
+</section>
+
+<h2 class="section-title">활성 예약</h2>
+<section class="stack">
+    {% if reservations %}
+        {% for item in reservations %}
+        <div class="card admin-card">
+            <div class="admin-row">
+                <div class="admin-main">
+                    <strong class="admin-title">{{ item.reservation.name }} · {{ item.type_label }}</strong>
+                    <small class="admin-sub">
+                        {{ item.location_name }}<br>
+                        {{ item.reservation.contact }}{% if item.estimate %} · {{ item.estimate.text }}{% endif %}
+                    </small>
+                    <div class="admin-meta">
+                        <span class="pill {{ item.pill_class }}">{{ item.status_text }}</span>
+                        <span class="pill">예약 #{{ item.reservation.id }}</span>
+                    </div>
+                </div>
+            </div>
+            <form class="admin-form" method="POST" action="{{ url_for('admin_finish_reservation_action', res_id=item.reservation.id) }}" onsubmit="return confirm('이 예약을 강제 완료 처리할까요?');">
+                <button type="submit" class="btn btn-danger-soft btn-small">강제 완료 처리</button>
+            </form>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="card empty-message">현재 활성 예약이 없습니다.</div>
+    {% endif %}
+</section>
+{% endblock %}

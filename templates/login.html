@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+
+{% block title %}기숙사 세탁 예약{% endblock %}
+{% block topbar %}{% endblock %}
+
+{% block extra_style %}
+<style>
+    .login-wrap {
+        min-height: calc(100svh - 52px - env(safe-area-inset-bottom));
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 20px;
+    }
+
+    .brand-hero {
+        text-align: center;
+        padding: 18px 4px 4px;
+    }
+
+    .brand-icon {
+        width: 74px;
+        height: 74px;
+        margin: 0 auto 16px;
+        border-radius: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: linear-gradient(135deg, #FFFFFF, #EEF4FF);
+        box-shadow: 0 18px 35px rgba(63, 123, 255, 0.16);
+        font-size: 38px;
+    }
+
+    .brand-hero h1 {
+        font-size: 30px;
+    }
+
+    .brand-hero p {
+        margin: 10px 0 0;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.5;
+    }
+
+    .login-card {
+        padding: 22px;
+    }
+
+    .login-note {
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+        text-align: center;
+    }
+
+    .guide-link-wrap {
+        margin-top: 12px;
+        text-align: center;
+    }
+
+    .guide-link {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 750;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+    }
+
+    .guide-link:active {
+        color: var(--primary-dark);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="login-wrap">
+    <section class="brand-hero">
+        <div class="brand-icon">🧺</div>
+        <h1>기숙사 세탁 예약</h1>
+        <p>세탁기와 건조기를<br>모바일에서 바로 예약하세요.</p>
+    </section>
+
+    <section class="card login-card">
+        {% if error %}
+            <div class="alert alert-danger">{{ error }}</div>
+        {% endif %}
+
+        <form method="POST" autocomplete="on">
+            <div class="form-row">
+                <label class="field-label" for="name">이름</label>
+                <input class="field" id="name" type="text" name="name" placeholder="이름을 입력하세요" required autocomplete="name" value="{{ name or '' }}">
+            </div>
+
+            <div class="form-row">
+                <label class="field-label" for="contact">휴대폰 번호</label>
+                <input class="field" id="contact" type="tel" name="contact" placeholder="01012345678" required autocomplete="tel" inputmode="tel" pattern="[0-9\-\s]*" value="{{ contact or '' }}">
+                <p class="helper">하이픈이나 공백을 넣어도 자동으로 정리됩니다.</p>
+            </div>
+
+            <button class="btn btn-primary" type="submit">시작하기</button>
+        </form>
+
+        <div class="guide-link-wrap">
+            <a class="guide-link" href="{{ url_for('guide') }}">이용 방법</a>
+        </div>
+    </section>
+
+    <p class="login-note">번호는 예약 알림 전송에만 사용됩니다.</p>
+</div>
+{% endblock %}

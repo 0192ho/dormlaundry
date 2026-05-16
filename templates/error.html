@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block topbar_title %}{{ title }}{% endblock %}
+{% block topbar_left %}<span class="topbar-spacer" aria-hidden="true"></span>{% endblock %}
+
+{% block extra_style %}
+<style>
+    .error-card {
+        padding: 24px 20px;
+        text-align: center;
+    }
+
+    .error-icon {
+        width: 72px;
+        height: 72px;
+        margin: 0 auto 16px;
+        border-radius: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--danger-weak);
+        font-size: 34px;
+    }
+
+    .error-code {
+        display: inline-flex;
+        margin-bottom: 10px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: var(--surface-soft);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 850;
+    }
+
+    .error-title {
+        margin: 0;
+        font-size: 26px;
+        font-weight: 950;
+        letter-spacing: -0.05em;
+    }
+
+    .error-message {
+        margin: 12px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+    }
+
+    .error-actions {
+        margin-top: 20px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="card error-card">
+    <div class="error-icon">⚠️</div>
+    <div class="error-code">{{ status_code }}</div>
+    <h1 class="error-title">{{ title }}</h1>
+    <p class="error-message">{{ message }}</p>
+
+    <div class="error-actions stack">
+        <a href="{{ primary_url }}" class="btn btn-primary">{{ primary_label }}</a>
+        {% if secondary_label and secondary_url %}
+            <a href="{{ secondary_url }}" class="btn btn-ghost">{{ secondary_label }}</a>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}
