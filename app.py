@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, abort
+from flask import Flask, render_template, request, redirect, url_for, session, abort, send_file
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import inspect, text
 from datetime import datetime
@@ -11,8 +11,14 @@ import hmac
 import hashlib
 import secrets
 import math
+import io
 
 import requests
+
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
 
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'secret123')
@@ -148,6 +154,8 @@ def get_admin_password():
 WASHER_AUTO_FINISH_MINUTES = 50
 DRYER_AUTO_FINISH_MINUTES = 50
 AUTO_FINISH_MACHINE_TYPES = ('washer', 'dryer')
+# 호출 후 이 시간 안에 예약한 장소의 QR로 체크인해야 한다.
+CHECKIN_GRACE_MINUTES = 5
 # 자동 완료 5분 전에는 다음 대기자에게 사전 알림을 보낸다.
 PRE_NOTICE_BEFORE_MINUTES = 5
 # 기존 이름을 쓰는 코드와의 호환용 별칭이다.
@@ -167,9 +175,15 @@ _last_web_cleanup_at = 0.0
 
 
 # --- 데이터베이스 모델 ---
+def create_location_qr_token():
+    """장소 QR 체크인 URL에 붙일 추측하기 어려운 토큰을 만든다."""
+    return secrets.token_urlsafe(24)
+
+
 class Location(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(50), nullable=False)
+    qr_token = db.Column(db.String(64), nullable=True, default=create_location_qr_token)  # 장소별 QR 체크인 토큰
 
 
 class Machine(db.Model):
@@ -177,7 +191,6 @@ class Machine(db.Model):
     name = db.Column(db.String(20), nullable=False)
     type = db.Column(db.String(10), nullable=False)  # washer / dryer
     is_available = db.Column(db.Boolean, default=True)
-
     location_id = db.Column(db.Integer, db.ForeignKey('location.id'))
     location = db.relationship('Location', backref='machines')
 
@@ -211,6 +224,16 @@ def create_access_token():
     return secrets.token_urlsafe(24)
 
 
+def ensure_location_extra_columns():
+    """기존 SQLite DB에도 장소 QR 체크인용 새 컬럼을 추가한다."""
+    inspector = inspect(db.engine)
+    columns = [column['name'] for column in inspector.get_columns('location')]
+
+    with db.engine.begin() as connection:
+        if 'qr_token' not in columns:
+            connection.execute(text('ALTER TABLE location ADD COLUMN qr_token VARCHAR(64)'))
+
+
 def ensure_reservation_extra_columns():
     """기존 SQLite DB에도 새 컬럼을 추가한다.
 
@@ -239,6 +262,18 @@ def ensure_reservation_extra_columns():
             connection.execute(text('ALTER TABLE reservation ADD COLUMN pre_call_message_sent_at DATETIME'))
 
 
+def ensure_existing_location_qr_tokens():
+    """기존 장소에도 QR 체크인 토큰을 채워 넣는다."""
+    changed = False
+    for location in Location.query.order_by(Location.id).all():
+        if not location.qr_token:
+            location.qr_token = create_location_qr_token()
+            changed = True
+
+    if changed:
+        db.session.commit()
+
+
 def ensure_existing_reservation_tokens():
     """기존 예약에도 접근 토큰을 채워 넣는다."""
     changed = False
@@ -258,8 +293,8 @@ with app.app_context():
             connection.execute(text('PRAGMA busy_timeout=30000'))
 
     db.create_all()
+    ensure_location_extra_columns()
     ensure_reservation_extra_columns()
-    ensure_existing_reservation_tokens()
 
     if Location.query.count() == 0:
         loc1 = Location(name="5층 중앙")
@@ -281,6 +316,9 @@ with app.app_context():
             db.session.add(Machine(name=f"건조기 {i}", type="dryer", location=loc3))
 
         db.session.commit()
+
+    ensure_existing_location_qr_tokens()
+    ensure_existing_reservation_tokens()
 
 
 # --- 유틸리티 함수 ---
@@ -316,6 +354,70 @@ def reservation_status_url(reservation):
     """토큰이 포함된 예약 상태 페이지 URL을 만든다."""
     token = ensure_reservation_access_token(reservation)
     return url_for('my_status', res_id=reservation.id, access_token=token)
+
+
+def is_safe_internal_path(path):
+    """로그인 후 이동할 내부 경로인지 확인해 오픈 리다이렉트를 막는다."""
+    if not path:
+        return False
+
+    path = str(path)
+    if not path.startswith('/') or path.startswith('//'):
+        return False
+    if '\n' in path or '\r' in path:
+        return False
+    return True
+
+
+def ensure_location_qr_token(location):
+    """장소에 QR 체크인 토큰이 없으면 즉시 생성한다."""
+    if not location.qr_token:
+        location.qr_token = create_location_qr_token()
+    return location.qr_token
+
+
+def location_qr_checkin_url(location, external=False):
+    """장소에 붙여둘 QR 체크인 URL을 만든다."""
+    token = ensure_location_qr_token(location)
+    return url_for(
+        'qr_checkin',
+        location_id=location.id,
+        qr_token=token,
+        _external=external
+    )
+
+
+def can_qr_check_in_reservation(reservation, location):
+    """예약자가 이 장소 QR로 사용을 시작할 수 있는지 확인한다."""
+    machine = reservation.machine if reservation else None
+    return (
+        reservation is not None
+        and location is not None
+        and machine is not None
+        and machine.location_id == location.id
+        and reservation.notified_at is not None
+        and not reservation.is_checked_in
+        and not reservation.is_completed
+        and not reservation.is_expired
+        and not getattr(reservation, 'is_cancelled', False)
+    )
+
+
+def is_checkin_window_expired(reservation, now=None):
+    """호출 후 QR 체크인 가능 시간이 지났는지 확인한다."""
+    if not reservation or not reservation.notified_at or reservation.is_checked_in:
+        return False
+
+    now = now or datetime.now()
+    elapsed_minutes = (now - reservation.notified_at).total_seconds() / 60
+    return elapsed_minutes >= CHECKIN_GRACE_MINUTES
+
+
+def mark_reservation_started(reservation):
+    """QR 체크인이 성공한 예약을 사용 중으로 바꾼다."""
+    reservation.is_checked_in = True
+    if reservation.started_at is None:
+        reservation.started_at = datetime.now()
 
 
 def current_contact():
@@ -530,7 +632,7 @@ def send_call_message(reservation):
     location_name = machine.location.name if machine.location else '세탁실'
     text = (
         f"{reservation.name}님, {location_name} {label} 사용 차례입니다. "
-        "5분 안에 앱에서 사용 시작을 눌러주세요."
+        f"{CHECKIN_GRACE_MINUTES}분 안에 해당 장소의 QR을 스캔해 체크인해주세요."
     )
 
     if send_laundry_message(reservation.contact, text):
@@ -667,7 +769,7 @@ def remaining_minutes_for_holder(reservation, now=None):
 
     if reservation.notified_at:
         elapsed = (now - reservation.notified_at).total_seconds() / 60
-        return ceil_minutes(5 - elapsed)
+        return ceil_minutes(CHECKIN_GRACE_MINUTES - elapsed)
 
     return 0
 
@@ -675,7 +777,7 @@ def remaining_minutes_for_holder(reservation, now=None):
 def estimate_wait_minutes_for_group(location_id, machine_type, target_reservation=None, include_new_reservation=False):
     """같은 위치/종류 대기열에서 예상 대기 시간을 계산한다.
 
-    빈 기기, 호출 후 5분 노쇼 창, 기기별 자동 완료 시간을 반영해 가볍게 시뮬레이션한다.
+    빈 기기, 호출 후 QR 체크인 가능 시간, 기기별 자동 완료 시간을 반영해 가볍게 시뮬레이션한다.
     세탁기와 건조기 모두 50분 자동 완료 기준으로 계산한다.
     """
     machines = Machine.query.filter_by(
@@ -739,7 +841,7 @@ def build_wait_estimate(location_id, machine_type, reservation=None, include_new
             }
 
         if reservation.notified_at:
-            return {'minutes': 0, 'text': '지금 바로 사용 가능합니다.', 'note': '5분 안에 사용 시작을 눌러주세요.'}
+            return {'minutes': 0, 'text': '지금 바로 사용 가능합니다.', 'note': f'{CHECKIN_GRACE_MINUTES}분 안에 예약한 장소의 QR을 스캔해 체크인해주세요.'}
 
     minutes = estimate_wait_minutes_for_group(
         location_id,
@@ -822,7 +924,7 @@ def _send_cleanup_messages(message_jobs):
 
 
 def cleanup_expired(limit=1, send_sms=True):
-    """호출 후 5분이 지난 미시작 예약을 정리한다.
+    """호출 후 QR 체크인 가능 시간이 지난 미시작 예약을 정리한다.
 
     무료 계정에서는 웹 요청 안에서 실행되므로 한 번에 limit건만 처리한다.
     """
@@ -840,7 +942,7 @@ def cleanup_expired(limit=1, send_sms=True):
 
     for user in candidates:
         time_diff = (now - user.notified_at).total_seconds() / 60
-        if time_diff < 5:
+        if time_diff < CHECKIN_GRACE_MINUTES:
             continue
 
         machine = user.machine
@@ -1041,7 +1143,9 @@ def should_run_cleanup_for_request():
         'select_location',
         'machines',
         'my_status',
+        'qr_checkin',
         'admin',
+        'admin_qr_codes',
     }
 
 
@@ -1098,23 +1202,38 @@ def index():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    next_url = request.form.get('next') if request.method == 'POST' else request.args.get('next')
+    if not is_safe_internal_path(next_url):
+        next_url = ''
+
     if request.method == 'POST':
         name = (request.form.get('name') or '').strip()
         contact = normalize_phone_number(request.form.get('contact'))
 
         if not name:
-            return render_template('login.html', error="이름을 입력해주세요.", name=name, contact=contact), 400
+            return render_template(
+                'login.html',
+                error="이름을 입력해주세요.",
+                name=name,
+                contact=contact,
+                next_url=next_url
+            ), 400
 
         if not is_valid_phone_number(contact):
             return render_template(
                 'login.html',
                 error="휴대폰 번호는 01012345678 형식으로 입력해주세요.",
                 name=name,
-                contact=contact
+                contact=contact,
+                next_url=next_url
             ), 400
 
         session['name'] = name
         session['contact'] = contact
+
+        # QR을 먼저 스캔한 사용자는 로그인 후 바로 체크인 URL로 돌려보낸다.
+        if next_url:
+            return redirect(next_url)
 
         # 이미 대기 중이거나 사용 중인 예약이 있으면 위치 선택 대신 대시보드로 보낸다.
         if active_reservations_for_user(contact).first():
@@ -1122,7 +1241,7 @@ def login():
 
         return redirect(url_for('select_location'))
 
-    return render_template('login.html')
+    return render_template('login.html', next_url=next_url)
 
 
 @app.route('/guide')
@@ -1365,10 +1484,8 @@ def my_status(res_id, access_token):
             break
 
     can_start = (
-        user_res.notified_at is not None
-        and not user_res.is_checked_in
-        and not user_res.is_completed
-        and not user_res.is_expired
+        can_qr_check_in_reservation(user_res, machine.location)
+        and not is_checkin_window_expired(user_res)
     )
 
     stats = get_machine_stats(location_id, machine_type)
@@ -1381,6 +1498,7 @@ def my_status(res_id, access_token):
         location=machine.location,
         type_label=label,
         type_code=machine_type,
+        assigned_machine_name=machine.name if user_res.notified_at else '배정 대기',
         auto_finish_minutes=auto_finish_minutes_for_type(machine_type),
         my_rank=my_rank,
         can_start=can_start,
@@ -1430,6 +1548,136 @@ def cancel_reservation(res_id, access_token):
     return redirect(url_for('select_location'))
 
 
+@app.route('/qr-checkin/<int:location_id>/<qr_token>', methods=['GET', 'POST'])
+def qr_checkin(location_id, qr_token):
+    location = db.session.get(Location, location_id)
+    if not location:
+        abort(404)
+
+    expected_token = ensure_location_qr_token(location)
+    if not qr_token or not secrets.compare_digest(qr_token, expected_token):
+        abort(403)
+
+    # QR을 먼저 스캔한 사용자는 로그인 후 같은 QR URL로 돌아와 체크인한다.
+    if not require_logged_in():
+        db.session.commit()
+        return redirect(url_for('login', next=request.path))
+
+    contact = current_contact()
+    active_at_location = Reservation.query.join(Machine).filter(
+        Reservation.contact == contact,
+        Machine.location_id == location.id,
+        Reservation.is_completed == False,
+        Reservation.is_expired == False,
+        Reservation.is_cancelled == False
+    ).order_by(Reservation.notified_at, Reservation.created_at).all()
+
+    if not active_at_location:
+        active_elsewhere = active_reservations_for_user(contact).first()
+        if active_elsewhere:
+            return render_error_page(
+                f'{location.name} QR로 체크인할 수 있는 예약이 없습니다. 예약한 장소의 QR을 스캔해주세요.',
+                400,
+                title='체크인할 수 없습니다',
+                primary_label='내 예약 모아보기',
+                primary_url=url_for('dashboard')
+            )
+
+        return render_error_page(
+            f'{location.name}에 체크인할 수 있는 활성 예약이 없습니다. 먼저 해당 장소에서 예약해주세요.',
+            400,
+            title='체크인할 수 없습니다',
+            primary_label='예약하러 가기',
+            primary_url=url_for('machines', location_id=location.id),
+            secondary_label='내 예약 모아보기',
+            secondary_url=url_for('dashboard')
+        )
+
+    already_started = [reservation for reservation in active_at_location if reservation.is_checked_in]
+    candidates = [
+        reservation for reservation in active_at_location
+        if can_qr_check_in_reservation(reservation, location)
+    ]
+
+    if not candidates:
+        if already_started:
+            return redirect(reservation_status_url(already_started[0]))
+
+        waiting = next((reservation for reservation in active_at_location if not reservation.notified_at), None)
+        if waiting:
+            message = '아직 차례가 오지 않았습니다. 차례가 오면 이 장소 QR로 체크인할 수 있습니다.'
+            primary_url = reservation_status_url(waiting)
+        else:
+            message = '이 장소 QR로 체크인할 수 없는 예약입니다. 예약 상태를 확인해주세요.'
+            primary_url = reservation_status_url(active_at_location[0])
+
+        return render_error_page(
+            message,
+            400,
+            title='체크인할 수 없습니다',
+            primary_label='예약 상태 보기',
+            primary_url=primary_url,
+            secondary_label='내 예약 모아보기',
+            secondary_url=url_for('dashboard')
+        )
+
+    expired_candidates = [reservation for reservation in candidates if is_checkin_window_expired(reservation)]
+    if expired_candidates:
+        for reservation in expired_candidates:
+            machine = reservation.machine
+            reservation.is_expired = True
+            reservation.is_completed = True
+            db.session.flush()
+            if machine:
+                notify_next_waiting(machine)
+        db.session.commit()
+
+        candidates = [reservation for reservation in candidates if reservation not in expired_candidates]
+        if not candidates:
+            return render_error_page(
+                f'{CHECKIN_GRACE_MINUTES}분 안에 QR 체크인을 하지 않아 예약이 자동 취소되었습니다.',
+                400,
+                title='체크인 시간이 지났습니다',
+                primary_label='내 예약 모아보기',
+                primary_url=url_for('dashboard')
+            )
+
+    selected_reservation = None
+    if request.method == 'POST':
+        selected_id = request.form.get('reservation_id', type=int)
+        selected_reservation = next((reservation for reservation in candidates if reservation.id == selected_id), None)
+        if selected_reservation is None:
+            return render_error_page(
+                '선택한 예약을 이 장소 QR로 체크인할 수 없습니다. 예약 상태를 다시 확인해주세요.',
+                400,
+                title='체크인할 수 없습니다',
+                primary_label='내 예약 모아보기',
+                primary_url=url_for('dashboard')
+            )
+    elif len(candidates) == 1:
+        selected_reservation = candidates[0]
+    else:
+        items = []
+        for reservation in candidates:
+            machine = reservation.machine
+            machine_type = machine.type if machine else 'washer'
+            items.append({
+                'reservation': reservation,
+                'type_label': machine_type_label(machine_type),
+                'machine_name': machine.name if machine else '기기',
+                'notified_at': reservation.notified_at,
+            })
+        return render_template(
+            'location_checkin_select.html',
+            location=location,
+            items=items
+        )
+
+    mark_reservation_started(selected_reservation)
+    status_url = reservation_status_url(selected_reservation)
+    db.session.commit()
+    return redirect(status_url)
+
 @app.route('/start/<int:res_id>/<access_token>', methods=['POST'])
 def start_laundry(res_id, access_token):
     res = Reservation.query.get_or_404(res_id)
@@ -1437,13 +1685,16 @@ def start_laundry(res_id, access_token):
     if unauthorized_response:
         return unauthorized_response
 
-    if res.notified_at and not res.is_completed and not res.is_expired and not res.is_cancelled:
-        res.is_checked_in = True
-        if res.started_at is None:
-            res.started_at = datetime.now()
-        db.session.commit()
+    if res.is_checked_in or res.is_completed or res.is_expired or res.is_cancelled:
+        return redirect(reservation_status_url(res))
 
-    return redirect(reservation_status_url(res))
+    return render_error_page(
+        '사용 시작은 예약한 장소의 QR 체크인으로만 가능합니다. 세탁실에 붙은 장소 QR을 스캔해주세요.',
+        400,
+        title='QR 체크인이 필요합니다',
+        primary_label='예약 상태 보기',
+        primary_url=reservation_status_url(res)
+    )
 
 
 @app.route('/finish/<int:res_id>/<access_token>', methods=['POST'])
@@ -1514,6 +1765,23 @@ def admin_group_items():
                 'stats': stats,
                 'estimate': estimate,
             })
+    return items
+
+
+def admin_location_qr_items():
+    """관리자 QR 출력 화면에 표시할 장소별 QR 정보."""
+    locations = Location.query.order_by(Location.id).all()
+    items = []
+    for location in locations:
+        ensure_location_qr_token(location)
+        machine_count = Machine.query.filter_by(location_id=location.id).count()
+        items.append({
+            'location': location,
+            'location_name': location.name,
+            'machine_count': machine_count,
+            'qr_url': location_qr_checkin_url(location, external=True),
+            'qr_image_url': url_for('admin_location_qr_image', location_id=location.id),
+        })
     return items
 
 
@@ -1618,6 +1886,72 @@ def admin():
         groups=admin_group_items(),
         reservations=admin_reservation_items()
     )
+
+
+@app.route('/admin/qrs')
+def admin_qr_codes():
+    response = require_admin()
+    if response:
+        return response
+
+    notice = session.pop('admin_notice', None)
+    locations = admin_location_qr_items()
+    db.session.commit()
+    return render_template('admin_qr.html', notice=notice, locations=locations)
+
+
+@app.route('/admin/location-qr/<int:location_id>.png')
+def admin_location_qr_image(location_id):
+    response = require_admin()
+    if response:
+        return response
+
+    if qrcode is None:
+        return 'qrcode 패키지가 설치되어 있지 않습니다. pip install qrcode[pil] 명령으로 설치해주세요.', 500
+
+    location = db.session.get(Location, location_id)
+    if not location:
+        abort(404)
+
+    qr_url = location_qr_checkin_url(location, external=True)
+    db.session.commit()
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(qr_url)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color='black', back_color='white')
+
+    buffer = io.BytesIO()
+    image.save(buffer, format='PNG')
+    buffer.seek(0)
+
+    return send_file(
+        buffer,
+        mimetype='image/png',
+        download_name=f'laundry-location-{location.id}-qr.png'
+    )
+
+
+@app.route('/admin/location-qr/<int:location_id>/rotate', methods=['POST'])
+def admin_rotate_location_qr(location_id):
+    response = require_admin()
+    if response:
+        return response
+
+    location = db.session.get(Location, location_id)
+    if not location:
+        abort(404)
+
+    location.qr_token = create_location_qr_token()
+    db.session.commit()
+
+    session['admin_notice'] = f'{location.name} QR 체크인 주소를 재발급했습니다. 기존 QR은 더 이상 동작하지 않습니다.'
+    return redirect(url_for('admin_qr_codes'))
 
 
 @app.route('/admin/logout')

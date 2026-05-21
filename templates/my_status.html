@@ -175,6 +175,27 @@
         margin-top: 10px;
     }
 
+    .qr-checkin-card {
+        padding: 15px;
+        border-radius: 18px;
+        background: var(--success-weak);
+        border: 1px solid rgba(23, 178, 106, 0.18);
+        color: #087443;
+        text-align: left;
+        font-size: 14px;
+        line-height: 1.5;
+        font-weight: 750;
+    }
+
+    .qr-checkin-card strong {
+        display: block;
+        margin-bottom: 5px;
+        color: #087443;
+        font-size: 15px;
+        font-weight: 950;
+        letter-spacing: -0.03em;
+    }
+
     .estimate-card {
         padding: 16px;
         display: flex;
@@ -212,7 +233,7 @@
         <p class="status-desc">직접 취소한 예약입니다.</p>
     {% elif res.is_expired %}
         <h1 class="status-main danger">예약 취소됨</h1>
-        <p class="status-desc">5분 안에 사용 시작을 누르지 않아 자동 취소되었습니다.</p>
+        <p class="status-desc">5분 안에 장소 QR 체크인을 하지 않아 자동 취소되었습니다.</p>
     {% elif res.is_completed %}
         <h1 class="status-main success">사용 완료</h1>
         <p class="status-desc">이용해주셔서 감사합니다.</p>
@@ -227,12 +248,13 @@
 
         {% if can_start %}
             <p class="status-desc" style="color: var(--success); font-weight: 850;">지금 바로 사용 가능합니다.</p>
-            <form class="status-action" action="{{ url_for('start_laundry', res_id=res.id, access_token=access_token) }}" method="POST">
-                <button type="submit" class="btn btn-success">사용 시작</button>
-            </form>
+            <div class="status-action qr-checkin-card">
+                <strong>장소 QR을 스캔해주세요</strong>
+                {{ location.name }}에 붙은 QR을 스캔하면 자동으로 사용이 시작됩니다.<br>배정 기기: {{ assigned_machine_name }}
+            </div>
         {% else %}
             <div class="status-action">
-                <button class="btn btn-muted" disabled>차례가 되면 버튼이 열립니다</button>
+                <button class="btn btn-muted" disabled>차례가 되면 QR 체크인이 열립니다</button>
             </div>
         {% endif %}
 
@@ -303,7 +325,7 @@
 <div class="bottom-action stack">
     <a href="{{ url_for('dashboard') }}" class="btn btn-ghost">내 예약 모아보기</a>
     {% if can_select_location %}
-        <a href="{{ url_for('select_location') }}" class="btn btn-ghost">다른 장소 선택하기</a>
+        <a href="{{ url_for('select_location') }}" class="btn btn-ghost">다른 기기 선택하기</a>
     {% endif %}
 </div>
 {% endblock %}

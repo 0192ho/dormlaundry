@@ -87,6 +87,7 @@
         {% endif %}
 
         <form method="POST" autocomplete="on">
+            {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
             <div class="form-row">
                 <label class="field-label" for="name">이름</label>
                 <input class="field" id="name" type="text" name="name" placeholder="이름을 입력하세요" required autocomplete="name" value="{{ name or '' }}">

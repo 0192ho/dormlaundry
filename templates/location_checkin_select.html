@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}QR 체크인 선택{% endblock %}
+{% block topbar_title %}QR 체크인{% endblock %}
+{% block topbar_left %}<a href="{{ url_for('dashboard') }}" class="icon-button" aria-label="내 예약으로 이동">‹</a>{% endblock %}
+{% block topbar_right %}<a href="{{ url_for('logout') }}" class="text-button" aria-label="로그아웃">나가기</a>{% endblock %}
+
+{% block extra_style %}
+<style>
+    .checkin-card {
+        padding: 18px;
+    }
+
+    .checkin-title {
+        display: block;
+        color: var(--ink);
+        font-size: 17px;
+        font-weight: 950;
+        letter-spacing: -0.03em;
+    }
+
+    .checkin-sub {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+    }
+
+    .checkin-form {
+        margin-top: 13px;
+    }
+
+    .btn-small {
+        min-height: 46px;
+        border-radius: 14px;
+        font-size: 14px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <div class="kicker">QR 체크인</div>
+    <h1>체크인할 예약을<br>선택하세요.</h1>
+    <p class="page-desc">{{ location.name }}에서 동시에 사용 가능한 예약이 여러 개 있습니다.</p>
+</section>
+
+<section class="stack" aria-label="체크인 가능한 예약 목록">
+    {% for item in items %}
+    <article class="card checkin-card">
+        <strong class="checkin-title">{{ item.type_label }} · {{ item.machine_name }}</strong>
+        <small class="checkin-sub">이 예약을 사용 시작으로 처리합니다.</small>
+        <form class="checkin-form" method="POST">
+            <input type="hidden" name="reservation_id" value="{{ item.reservation.id }}">
+            <button type="submit" class="btn btn-success btn-small">이 예약 체크인</button>
+        </form>
+    </article>
+    {% endfor %}
+</section>
+{% endblock %}

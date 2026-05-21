@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+
+{% block title %}QR 체크인 관리{% endblock %}
+{% block topbar_title %}QR 체크인{% endblock %}
+{% block topbar_left %}<a href="{{ url_for('admin') }}" class="icon-button" aria-label="관리자로 돌아가기">‹</a>{% endblock %}
+{% block topbar_right %}<a href="{{ url_for('admin_logout') }}" class="text-button" aria-label="관리자 로그아웃">나가기</a>{% endblock %}
+
+{% block extra_style %}
+<style>
+    .admin-notice {
+        margin-bottom: 14px;
+        padding: 13px 14px;
+        border-radius: 16px;
+        color: #087443;
+        background: var(--success-weak);
+        border: 1px solid rgba(23, 178, 106, 0.18);
+        font-size: 14px;
+        font-weight: 800;
+        line-height: 1.45;
+    }
+
+    .print-tip {
+        padding: 16px;
+        margin-bottom: 14px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+    }
+
+    .print-tip strong {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--ink);
+        font-size: 14px;
+        font-weight: 950;
+    }
+
+    .qr-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+    }
+
+    .qr-card {
+        padding: 18px;
+        text-align: center;
+    }
+
+    .qr-title {
+        display: block;
+        color: var(--ink);
+        font-size: 18px;
+        font-weight: 950;
+        letter-spacing: -0.04em;
+    }
+
+    .qr-sub {
+        display: block;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+    }
+
+    .qr-image-wrap {
+        margin: 14px auto;
+        padding: 12px;
+        width: 210px;
+        border-radius: 22px;
+        background: #FFFFFF;
+        border: 1px solid var(--line);
+        box-shadow: 0 10px 20px rgba(23, 32, 51, 0.055);
+    }
+
+    .qr-image {
+        display: block;
+        width: 100%;
+        height: auto;
+    }
+
+    .qr-url {
+        width: 100%;
+        height: 46px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        outline: none;
+        background: var(--surface-soft);
+        color: var(--muted);
+        font-size: 12px;
+    }
+
+    .qr-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 9px;
+        margin-top: 12px;
+    }
+
+    .btn-small {
+        min-height: 42px;
+        border-radius: 14px;
+        font-size: 14px;
+    }
+
+    .print-action {
+        margin-top: 12px;
+    }
+
+    @media print {
+        html,
+        body {
+            background: #FFFFFF !important;
+        }
+
+        .app-shell {
+            max-width: none;
+            min-height: auto;
+            box-shadow: none;
+            background: #FFFFFF;
+        }
+
+        .topbar,
+        .page-head,
+        .print-tip,
+        .admin-notice,
+        .qr-actions,
+        .print-action,
+        .qr-url {
+            display: none !important;
+        }
+
+        .content {
+            padding: 0;
+        }
+
+        .qr-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .qr-card {
+            box-shadow: none;
+            break-inside: avoid;
+            page-break-inside: avoid;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <div class="kicker">QR 체크인</div>
+    <h1>장소별 QR을<br>출력하세요.</h1>
+    <p class="page-desc">각 QR은 해당 장소 전용입니다. 사용자는 차례가 온 뒤 예약한 장소의 QR을 스캔하면 사용이 시작됩니다.</p>
+</section>
+
+{% if notice %}
+    <div class="admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card print-tip">
+    <strong>출력 방법</strong>
+    이 화면을 인쇄하거나 각 QR 이미지를 열어 저장한 뒤, 표시된 세탁실 위치에 맞춰 하나씩 부착하세요.
+    QR 주소를 재발급하면 기존에 붙여둔 QR은 더 이상 동작하지 않습니다.
+    <div class="print-action">
+        <button type="button" class="btn btn-primary btn-small" onclick="window.print()">전체 QR 인쇄</button>
+    </div>
+</section>
+
+<section class="qr-grid" aria-label="장소별 QR 목록">
+    {% for item in locations %}
+    <article class="card qr-card">
+        <strong class="qr-title">{{ item.location_name }}</strong>
+        <small class="qr-sub">장소 공용 QR · 설치 기기 {{ item.machine_count }}대</small>
+
+        <div class="qr-image-wrap">
+            <img class="qr-image" src="{{ item.qr_image_url }}" alt="{{ item.location_name }} QR 체크인" loading="lazy">
+        </div>
+
+        <input class="qr-url" type="text" value="{{ item.qr_url }}" readonly onclick="this.select();">
+
+        <div class="qr-actions">
+            <a class="btn btn-ghost btn-small" href="{{ item.qr_image_url }}" target="_blank" rel="noopener">QR 이미지 열기</a>
+            <a class="btn btn-ghost btn-small" href="{{ item.qr_url }}" target="_blank" rel="noopener">체크인 링크 테스트</a>
+            <form method="POST" action="{{ url_for('admin_rotate_location_qr', location_id=item.location.id) }}" onsubmit="return confirm('이 장소의 QR 주소를 재발급할까요? 기존 QR은 더 이상 동작하지 않습니다.');">
+                <button type="submit" class="btn btn-danger-soft btn-small">QR 주소 재발급</button>
+            </form>
+        </div>
+    </article>
+    {% endfor %}
+</section>
+{% endblock %}
